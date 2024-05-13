@@ -19,13 +19,30 @@
 package org.vinaylogics;
 
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.connector.sink2.Sink;
+import org.apache.flink.connector.elasticsearch.sink.Elasticsearch7SinkBuilder;
+import org.apache.flink.connector.jdbc.JdbcConnectionOptions;
+import org.apache.flink.connector.jdbc.JdbcExecutionOptions;
+import org.apache.flink.connector.jdbc.JdbcSink;
+import org.apache.flink.connector.jdbc.JdbcStatementBuilder;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
+import org.apache.flink.elasticsearch7.shaded.org.apache.http.HttpHost;
+import org.apache.flink.elasticsearch7.shaded.org.elasticsearch.action.index.IndexRequest;
+import org.apache.flink.elasticsearch7.shaded.org.elasticsearch.client.Requests;
+import org.apache.flink.elasticsearch7.shaded.org.elasticsearch.common.xcontent.XContentType;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.vinaylogics.deserializer.JSONKeyValueDeserializationSchema;
+import org.vinaylogics.dto.SalesPerCategory;
+import org.vinaylogics.dto.SalesPerDay;
+import org.vinaylogics.dto.SalesPerMonth;
 import org.vinaylogics.dto.Transaction;
+
+import java.sql.Date;
+
+import static org.vinaylogics.utils.JsonUtil.convertTransactionToJson;
+
 
 /**
  * Skeleton for a Flink DataStream Job.
@@ -40,6 +57,10 @@ import org.vinaylogics.dto.Transaction;
  * method, change the respective entry in the POM.xml file (simply search for 'mainClass').
  */
 public class DataStreamJob {
+
+	private static String jdbcUrl = "jdbc:postgresql://localhost:5432/postgres";
+	private static String username = "postgres";
+	private static String password = "postgres";
 
 	public static void main(String[] args) throws Exception {
 		// Sets up the execution environment, which is the main entry point
@@ -58,28 +79,229 @@ public class DataStreamJob {
 		DataStream<Transaction> transactionStream = env.fromSource(source, WatermarkStrategy.noWatermarks(), "Kafka Sources");
 
 		transactionStream.print();
+		JdbcExecutionOptions execOptions = new JdbcExecutionOptions.Builder()
+				.withBatchSize(1000)
+				.withBatchIntervalMs(200)
+				.withMaxRetries(5)
+				.build();
+		JdbcConnectionOptions connOptions = new JdbcConnectionOptions.JdbcConnectionOptionsBuilder()
+				.withUrl(jdbcUrl)
+				.withDriverName("org.postgresql.Driver")
+				.withUsername(username)
+				.withPassword(password)
+						.build();
 
-		/*
-		 * Here, you can start creating your execution plan for Flink.
-		 *
-		 * Start with getting some data from the environment, like
-		 * 	env.fromSequence(1, 10);
-		 *
-		 * then, transform the resulting DataStream<Long> using operations
-		 * like
-		 * 	.filter()
-		 * 	.flatMap()
-		 * 	.window()
-		 * 	.process()
-		 *
-		 * and many more.
-		 * Have a look at the programming guide:
-		 *
-		 * https://nightlies.apache.org/flink/flink-docs-stable/
-		 *
-		 */
+		transactionStream.addSink(JdbcSink.sink(
+				 """
+				 CREATE TABLE IF NOT EXISTS transactions (
+				 transaction_id VARCHAR(255) PRIMARY KEY,
+				 product_id VARCHAR(255),
+				 product_name VARCHAR(255),
+				 product_category VARCHAR(255),
+				 product_price DOUBLE PRECISION,
+				 product_quantity INTEGER,
+				 product_brand VARCHAR(255),
+				 total_amount DOUBLE PRECISION,
+				 currency VARCHAR(255),
+				 customer_id VARCHAR(255),
+				 transaction_date TIMESTAMP,
+				 payment_method VARCHAR(255)
+				 );
+				""",
+				(JdbcStatementBuilder<Transaction>) (preparedStatement,transaction) ->{
+
+				},
+				execOptions,
+				connOptions
+
+		)).name("CREATE Transactions Table Sink");
+
+		// Create  sales_per_category table sink
+		transactionStream.addSink(JdbcSink.sink(
+				"""
+                CREATE TABLE IF NOT EXISTS sales_per_category (
+                transaction_date DATE,
+                category VARCHAR(255),
+                total_sales DOUBLE PRECISION,
+                PRIMARY KEY (transaction_date, category)
+                );
+               """,
+				(JdbcStatementBuilder<Transaction>) (preparedStatement,transaction) ->{
+
+				},
+				execOptions,
+				connOptions
+
+		)).name("Create Sales Per Category Table Sink");
+
+		// Create sales_per_day table sink
+		transactionStream.addSink(JdbcSink.sink(
+				"""
+                CREATE TABLE IF NOT EXISTS sales_per_day (
+                transaction_date DATE PRIMARY KEY,
+                total_sales DOUBLE PRECISION
+                );
+               """,
+				(JdbcStatementBuilder<Transaction>) (preparedStatement,transaction) ->{
+
+				},
+				execOptions,
+				connOptions
+
+		)).name("Create Sales Per Day Table Sink");
+
+		// Create sales_per_month table sink
+		transactionStream.addSink(JdbcSink.sink(
+				"""
+                CREATE TABLE IF NOT EXISTS sales_per_month (
+                year INTEGER,
+                month INTEGER,
+                total_sales DOUBLE PRECISION,
+                PRIMARY KEY (year, month)
+                );
+               """,
+				(JdbcStatementBuilder<Transaction>) (preparedStatement,transaction) ->{
+
+				},
+				execOptions,
+				connOptions
+
+		)).name("Create Sales Per Month Table Sink");
+
+		transactionStream.addSink(JdbcSink.sink(
+				"""
+					INSERT INTO transactions (transaction_id, product_id, product_name, product_category, product_price,
+					product_quantity, product_brand, total_amount, currency, customer_id , transaction_date, payment_method)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					ON CONFLICT (transaction_id) DO UPDATE SET
+					product_id = EXCLUDED.product_id,
+					product_name = EXCLUDED.product_name,
+					product_category = EXCLUDED.product_category,
+					product_price = EXCLUDED.product_price,
+					product_quantity = EXCLUDED.product_quantity,
+					product_brand = EXCLUDED.product_brand,
+					total_amount = EXCLUDED.total_amount,
+					currency = EXCLUDED.currency,
+					customer_id = EXCLUDED.customer_id,
+					transaction_date = EXCLUDED.transaction_date,
+					payment_method = EXCLUDED.payment_method
+					WHERE transactions.transaction_id = EXCLUDED.transaction_id;
+					""",
+				(JdbcStatementBuilder<Transaction>) (preparedStatement,transaction) ->{
+					preparedStatement.setString(1, transaction.getTransactionId());
+					preparedStatement.setString(2, transaction.getProductId());
+					preparedStatement.setString(3, transaction.getProductName());
+					preparedStatement.setString(4, transaction.getProductCategory());
+					preparedStatement.setDouble(5, transaction.getProductPrice());
+					preparedStatement.setInt(6, transaction.getProductQuantity());
+					preparedStatement.setString(7, transaction.getProductBrand());
+					preparedStatement.setDouble(8, transaction.getTotalAmount());
+					preparedStatement.setString(9, transaction.getCurrency());
+					preparedStatement.setString(10, transaction.getCustomerId());
+					preparedStatement.setTimestamp(11, transaction.getTransactionDate());
+					preparedStatement.setString(12, transaction.getPaymentMethod());
+				},
+				execOptions,
+				connOptions
+		)).name("Insert into transaction table sink");
+
+		transactionStream.map(
+				transaction -> {
+					Date transactionDate = new Date(System.currentTimeMillis());
+					String category = transaction.getProductCategory();
+					double totalSales = transaction.getTotalAmount();
+					return new SalesPerCategory(transactionDate,category,totalSales);
+				}).keyBy(SalesPerCategory::getCategory)
+				.reduce(((salesPerCategory, t1) -> {
+					salesPerCategory.setTotalSales(salesPerCategory.getTotalSales()+ t1.getTotalSales());
+					return salesPerCategory;
+				})).addSink(JdbcSink.sink(
+								"""
+								INSERT into sales_per_category(transaction_date, category, total_sales)
+								VALUES (?,?,?)
+								ON CONFLICT (transaction_date, category) DO UPDATE SET
+								total_sales = EXCLUDED.total_sales
+								WHERE sales_per_category.category = EXCLUDED.category AND
+								 sales_per_category.transaction_date = EXCLUDED.transaction_date;
+								""",
+								(JdbcStatementBuilder<SalesPerCategory>) (preparedStatement,salesPerCategory) ->{
+									preparedStatement.setDate(1, salesPerCategory.getTransactionDate());
+									preparedStatement.setString(2, salesPerCategory.getCategory());
+									preparedStatement.setDouble(3, salesPerCategory.getTotalSales());
+								},
+								execOptions,
+								connOptions
+						)).name("Insert into sales_per_category table sink");
+
+		transactionStream.map(
+				transaction -> {
+					Date transactionDate = new Date(System.currentTimeMillis());
+					double totalSales = transaction.getTotalAmount();
+					return new SalesPerDay(transactionDate,totalSales);
+				}).keyBy(SalesPerDay::getTransactionDate)
+				.reduce(((salesPerDay, t1) -> {
+					salesPerDay.setTotalSales(salesPerDay.getTotalSales()+ t1.getTotalSales());
+					return salesPerDay;
+				})).addSink(JdbcSink.sink(
+								"""
+								INSERT into sales_per_day(transaction_date, total_sales)
+								VALUES (?,?)
+								ON CONFLICT (transaction_date) DO UPDATE SET
+								total_sales = EXCLUDED.total_sales
+								WHERE sales_per_day.transaction_date = EXCLUDED.transaction_date;
+								""",
+								(JdbcStatementBuilder<SalesPerDay>) (preparedStatement,salesPerCategory) ->{
+									preparedStatement.setDate(1, salesPerCategory.getTransactionDate());
+									preparedStatement.setDouble(2, salesPerCategory.getTotalSales());
+								},
+								execOptions,
+								connOptions
+						)).name("Insert into sales_per_day table sink");
+
+		transactionStream.map(
+				transaction -> {
+					Date transactionDate = new Date(System.currentTimeMillis());
+					int year = transactionDate.toLocalDate().getYear();
+					int month = transactionDate.toLocalDate().getMonth().getValue();
+					double totalSales = transaction.getTotalAmount();
+					return new SalesPerMonth(year,month,totalSales);
+				}).keyBy(SalesPerMonth::getMonth)
+				.reduce(((salesPerMonth, t1) -> {
+					salesPerMonth.setTotalSales(salesPerMonth.getTotalSales()+ t1.getTotalSales());
+					return salesPerMonth;
+				})).addSink(JdbcSink.sink(
+								"""
+								INSERT into sales_per_month(year, month, total_sales)
+								VALUES (?,?,?)
+								ON CONFLICT (year, month) DO UPDATE SET
+								total_sales = EXCLUDED.total_sales
+								WHERE sales_per_month.month = EXCLUDED.month AND
+								sales_per_month.year = EXCLUDED.year;
+								""",
+								(JdbcStatementBuilder<SalesPerMonth>) (preparedStatement,salesPerCategory) ->{
+									preparedStatement.setInt(1, salesPerCategory.getYear());
+									preparedStatement.setInt(2, salesPerCategory.getMonth());
+									preparedStatement.setDouble(3, salesPerCategory.getTotalSales());
+								},
+								execOptions,
+								connOptions
+						)).name("Insert into sales_per_month table sink");
+
+		transactionStream.sinkTo(new Elasticsearch7SinkBuilder<Transaction>()
+						.setHosts(new HttpHost("localhost", 9200, "http"))
+						.setEmitter((transaction, runtimeContext, requestIndexer) -> {
+							String json = convertTransactionToJson(transaction);
+
+							IndexRequest indexRequest = Requests.indexRequest()
+									.index("transactions")
+									.id(transaction.getTransactionId())
+									.source(json, XContentType.JSON);
+							requestIndexer.add(indexRequest);
+						}).build()
+		).name("Elasticsearch Sink ");
+
 
 		// Execute program, beginning computation.
-		env.execute("Flink Java API Skeleton");
+		env.execute("Flink Ecommerce Real Time Streaming");
 	}
 }
