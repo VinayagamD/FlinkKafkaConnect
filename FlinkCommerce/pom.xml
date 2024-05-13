@@ -30,7 +30,7 @@ under the License.
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 		<flink.version>1.19.0</flink.version>
-		<target.java.version>1.8</target.java.version>
+		<target.java.version>21</target.java.version>
 		<scala.binary.version>2.12</scala.binary.version>
 		<maven.compiler.source>${target.java.version}</maven.compiler.source>
 		<maven.compiler.target>${target.java.version}</maven.compiler.target>
@@ -88,7 +88,15 @@ under the License.
 			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-sql-connector-elasticsearch7</artifactId>
 			<version>3.0.1-1.17</version>
-			<scope>provided</scope>
+			<scope>compile</scope>
+		</dependency>
+
+		<!-- https://mvnrepository.com/artifact/org.apache.flink/flink-connector-jdbc -->
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-connector-jdbc</artifactId>
+			<version>3.1.2-1.18</version>
+			<scope>compile</scope>
 		</dependency>
 
 
@@ -118,7 +126,7 @@ under the License.
 			<groupId>org.projectlombok</groupId>
 			<artifactId>lombok</artifactId>
 			<version>1.18.32</version>
-			<scope>provided</scope>
+			<scope>compile</scope>
 		</dependency>
 
 	</dependencies>
